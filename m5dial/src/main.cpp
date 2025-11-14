@@ -18,9 +18,12 @@
 #define RELAY_1_PIN 1
 #define RELAY_2_PIN 2
 
+#define ADC_SOIL_MOISTURE_PIN 15 // A2CH4
+
 struct tm timeinfo;
 bool button_a, button_b, button_c = false;
 int last_ntp_update_day = -1;
+bool time_initialized = false;
 
 
 enum Mode {
@@ -33,6 +36,32 @@ enum Mode {
 static long prev_pos = 0;
 static bool viz_data_updated = true;
 enum Mode current_mode = MODE_TEMP;
+
+// Soil moisture sensor variables
+volatile int soil_moisture_adc = 0;
+volatile float soil_moisture_voltage = 0.0;
+volatile float soil_moisture_percent = 0.0;
+
+// Sensor reading task
+void sensorTask(void* parameter) {
+  while (true) {
+    int adc_value = analogRead(ADC_SOIL_MOISTURE_PIN);
+    soil_moisture_adc = adc_value;
+    soil_moisture_voltage = (adc_value / 4095.0) * 3.3;
+    soil_moisture_percent = (adc_value / 4095.0) * 100.0;
+
+    // Serial output
+    Serial.print("Soil Moisture - ADC: ");
+    Serial.print(soil_moisture_adc);
+    Serial.print(" | Voltage: ");
+    Serial.print(soil_moisture_voltage, 3);
+    Serial.print("V | Percentage: ");
+    Serial.print(soil_moisture_percent, 1);
+    Serial.println("%");
+
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Update every 1 second
+  }
+}
 
 void ntp_update_with_timeout() {
   WiFi.mode(WIFI_STA);
@@ -72,6 +101,10 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     ntp_update_with_timeout();
+    if (getLocalTime(&timeinfo)) {
+      time_initialized = true;
+      Serial.println("Time initialized successfully");
+    }
   }
   Serial.println("WiFi connected.");
 
@@ -81,8 +114,23 @@ void setup() {
   pinMode(RELAY_2_PIN, OUTPUT);
   digitalWrite(RELAY_1_PIN, LOW);
   digitalWrite(RELAY_2_PIN, LOW);
+
+  pinMode(ADC_SOIL_MOISTURE_PIN, INPUT);
+  analogReadResolution(12); // 12-bit ADC (0-4095)
+
+  // Create sensor reading task on Core 0
+  xTaskCreatePinnedToCore(
+    sensorTask,       // Task function
+    "SensorTask",     // Task name
+    4096,             // Stack size
+    NULL,             // Parameters
+    1,                // Priority
+    NULL,             // Task handle
+    0                 // Core 0
+  );
+
   M5.Lcd.fillScreen(TFT_BLACK);
-  
+
 }
 
 
@@ -91,6 +139,26 @@ void loop() {
   M5.update();
   bool relay_1_on_past = false, relay_2_on_past = false;
   M5.Lcd.setTextColor(TFT_WHITE);
+
+  // Update time
+  getLocalTime(&timeinfo);
+
+  // Auto control RELAY_1_PIN based on time (8:00-18:00)
+  bool relay_1_auto_on = false;
+  if (time_initialized) {
+    int hour = timeinfo.tm_hour;
+    if (hour >= 8 && hour < 18) {
+      relay_1_auto_on = true;
+    }
+  }
+
+  static bool prev_button_a = false;
+  if (prev_button_a && !button_a) {
+    Serial.println("Switched to AUTO mode - RELAY_1 follows schedule");
+  } else if (!prev_button_a && button_a) {
+    Serial.println("Switched to MANUAL mode");
+  }
+  prev_button_a = button_a;
 
   if (viz_data_updated)
   {
@@ -112,13 +180,23 @@ void loop() {
         break;
       case MODE_SOIL_MOISTURE:
         M5.Lcd.drawCircle(120, 120, 119, TFT_GREEN);
-        M5.Lcd.printf("45.8");
+        M5.Lcd.printf("%.1f", soil_moisture_percent);
         break;
       case MODE_CO2:
         M5.Lcd.drawCircle(120, 120, 119, TFT_ORANGE);
         M5.Lcd.printf("566");
         break;
     }
+  }
+
+  // Update soil moisture display continuously when in MODE_SOIL_MOISTURE
+  if (current_mode == MODE_SOIL_MOISTURE) {
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setTextFont(7);
+    M5.Lcd.setCursor(70, 80);
+    M5.Lcd.fillRect(70, 80, 110, 50, TFT_BLACK);
+    M5.Lcd.setTextColor(TFT_WHITE);
+    M5.Lcd.printf("%.1f", soil_moisture_percent);
   }
 
   M5.Lcd.setTextSize(2);
@@ -142,10 +220,12 @@ void loop() {
     }
   } else {
     if (button_a) {
+      // Manual mode
       digitalWrite(RELAY_1_PIN, button_b ? HIGH : LOW);
       digitalWrite(RELAY_2_PIN, button_c ? HIGH : LOW);
     } else {
-      digitalWrite(RELAY_1_PIN, relay_1_on_past ? HIGH : LOW);
+      // Auto mode for RELAY_1, manual for RELAY_2
+      digitalWrite(RELAY_1_PIN, relay_1_auto_on ? HIGH : LOW);
       digitalWrite(RELAY_2_PIN, relay_2_on_past ? HIGH : LOW);
 
       button_b = digitalRead(RELAY_1_PIN) == HIGH;
