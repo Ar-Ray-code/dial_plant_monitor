@@ -1,6 +1,5 @@
-#include <M5Unified.h>
-#include <SD.h>
-#include <SPI.h>
+#include <Arduino.h>
+#include "M5Dial.h"
 #include <WiFi.h>
 
 #include <vector>
@@ -11,10 +10,8 @@
 
 #include "config.hpp"
 
-#define SD_SPI_SCK_PIN 36
-#define SD_SPI_MISO_PIN 35
-#define SD_SPI_MOSI_PIN 37
-#define SD_SPI_CS_PIN 4
+#define SCREEN_WIDTH 240
+#define SCREEN_HEIGHT 240
 
 #define JST 3600 * 9
 
@@ -25,9 +22,21 @@ struct tm timeinfo;
 bool button_a, button_b, button_c = false;
 int last_ntp_update_day = -1;
 
+
+enum Mode {
+  MODE_TEMP,
+  MODE_HUMI,
+  MODE_SOIL_MOISTURE,
+  MODE_CO2,
+};
+
+static long prev_pos = 0;
+static bool viz_data_updated = true;
+enum Mode current_mode = MODE_TEMP;
+
 void ntp_update_with_timeout() {
   WiFi.mode(WIFI_STA);
-  configTime(JST, 0, "ntp.nict.jp", "ntp.jst.mfeed.ad.jp");
+  configTzTime(TIMEZONE, NTP_SERVER1, NTP_SERVER2);
   unsigned long start = millis();
   while (!getLocalTime(&timeinfo) && millis() - start < 10000) {
     delay(100);
@@ -36,44 +45,89 @@ void ntp_update_with_timeout() {
 
 void setup() {
   auto cfg = M5.config();
-  M5.begin(cfg);
+  // M5.begin(cfg);
+  M5Dial.begin(cfg, true, true);
 
-  WiFi.begin(ssid, password);
-  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println("Connecting to WiFi");
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
   uint32_t time_cnt = millis();
+  prev_pos = M5Dial.Encoder.read();
+
   while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
     delay(500);
-    if (millis() - time_cnt > 5000) {
+    if (millis() - time_cnt > 1000) {
       break;
     }
     M5.Lcd.print(".");
   }
+  Serial.println("");
+
+  // delay
+  delay(1000);
 
   if (WiFi.status() == WL_CONNECTED) {
-    configTime(JST, 0, "ntp.nict.jp", "ntp.jst.mfeed.ad.jp");
+    ntp_update_with_timeout();
   }
+  Serial.println("WiFi connected.");
 
-  SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+  // SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
 
   pinMode(RELAY_1_PIN, OUTPUT);
   pinMode(RELAY_2_PIN, OUTPUT);
   digitalWrite(RELAY_1_PIN, LOW);
   digitalWrite(RELAY_2_PIN, LOW);
   M5.Lcd.fillScreen(TFT_BLACK);
+  
 }
 
 
 void loop() {
-  bool relay_1_on_past = false, relay_2_on_past = false;
-
-  M5.Lcd.setTextSize(2);
-  M5.Lcd.setCursor(80, 30);
-  M5.Lcd.fillRect(100, 10, 330, 50, TFT_BLACK);
-  M5.Lcd.setTextColor(TFT_WHITE);
-  M5.Lcd.printf("%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min,
-                timeinfo.tm_sec);
 
   M5.update();
+  bool relay_1_on_past = false, relay_2_on_past = false;
+  M5.Lcd.setTextColor(TFT_WHITE);
+
+  if (viz_data_updated)
+  {
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setTextFont(7);
+    M5.Lcd.setCursor(70, 80);
+    M5.Lcd.fillRect(70, 80, 110, 50, TFT_BLACK);
+    viz_data_updated = false;
+
+// TODO: Replace with real sensor data
+    switch (current_mode) {
+      case MODE_TEMP:
+        M5.Lcd.drawCircle(120, 120, 119, TFT_CYAN);
+        M5.Lcd.printf("23.5");
+        break;
+      case MODE_HUMI:
+        M5.Lcd.drawCircle(120, 120, 119, TFT_BLUE);
+        M5.Lcd.printf("68.1");
+        break;
+      case MODE_SOIL_MOISTURE:
+        M5.Lcd.drawCircle(120, 120, 119, TFT_GREEN);
+        M5.Lcd.printf("45.8");
+        break;
+      case MODE_CO2:
+        M5.Lcd.drawCircle(120, 120, 119, TFT_ORANGE);
+        M5.Lcd.printf("566");
+        break;
+    }
+  }
+
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setTextFont(0);
+  M5.Lcd.setCursor(90, 30);
+  M5.Lcd.fillRect(90, 30, 80, 50, TFT_BLACK);
+  M5.Lcd.setTextColor(TFT_WHITE);
+  M5.Lcd.printf("%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+
   auto t = M5.Touch.getDetail();
   auto x = t.x;
   auto y = t.y;
@@ -119,6 +173,18 @@ void loop() {
   } else {
   M5.Lcd.fillCircle(190, 180, 24, TFT_BLACK);
   }
+
+  long curr = M5Dial.Encoder.read();
+  if (curr - prev_pos >= 4) {
+    current_mode = static_cast<Mode>((current_mode + 1) % 4);
+    prev_pos = curr;
+    viz_data_updated = true;
+  } else if (curr - prev_pos <= -4) {
+    current_mode = static_cast<Mode>((current_mode + 3) % 4);
+    prev_pos = curr;
+    viz_data_updated = true;
+  }
+
   
   // Padlock icon
   const uint16_t padlock_x = 35, padlock_y = 165;
